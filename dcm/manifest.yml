@@ -1,0 +1,15 @@
+# DCM project: pipeline objects (stage, file format, pipes, dbt task).
+# Deployed by `mise run dcm` as PIPELINE_ADMIN; variables come from .env via -D.
+manifest_version: 2
+type: DCM_PROJECT
+default_target: LAB
+targets:
+  LAB:
+    project_name: LAKEHOUSE.OPS.LAKEHOUSE_DCM
+    project_owner: PIPELINE_ADMIN
+    templating_config: LAB
+templating:
+  defaults:
+    landing_bucket: "set-by-mise"
+  configurations:
+    LAB: {}

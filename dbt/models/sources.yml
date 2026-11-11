@@ -1,0 +1,10 @@
+version: 2
+sources:
+  - name: bronze
+    database: LAKEHOUSE
+    schema: BRONZE
+    tables:
+      - name: CUSTOMERS_RAW
+      - name: PRODUCTS_RAW
+      - name: RETURNS_RAW
+      - name: ORDERS_EVENTS

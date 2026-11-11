@@ -1,0 +1,78 @@
+version: 2
+
+models:
+  - name: customers_scd2
+    description: Customer history (SCD2) from the customer files; one row per customer version.
+    columns:
+      - name: customer_id
+        data_tests: [not_null]
+      - name: first_name
+        meta: {pii_type: NAME}
+      - name: last_name
+        meta: {pii_type: NAME}
+      - name: email
+        meta: {pii_type: EMAIL}
+      - name: phone
+        meta: {pii_type: PHONE}
+      - name: date_of_birth
+        meta: {pii_type: DOB}
+      - name: street
+        meta: {pii_type: ADDRESS}
+      - name: postal_code
+        meta: {pii_type: ADDRESS}
+      - name: city
+      - name: country
+      - name: valid_from
+      - name: valid_to
+      - name: is_current
+
+  - name: customers_current
+    description: The PROTECTED table for the masking lesson - current customer rows, PII tagged, row access by country.
+    config:
+      post_hook: ["{{ apply_pii_tags() }}", "{{ attach_row_access('country') }}"]
+    columns:
+      - name: customer_id
+        data_tests: [unique, not_null]
+      - name: first_name
+        meta: {pii_type: NAME}
+      - name: last_name
+        meta: {pii_type: NAME}
+      - name: email
+        meta: {pii_type: EMAIL}
+      - name: phone
+        meta: {pii_type: PHONE}
+      - name: date_of_birth
+        meta: {pii_type: DOB}
+      - name: street
+        meta: {pii_type: ADDRESS}
+      - name: postal_code
+        meta: {pii_type: ADDRESS}
+      - name: city
+      - name: country
+      - name: updated_at
+
+  - name: products
+    description: Latest version of every product.
+    columns:
+      - name: product_id
+        data_tests: [unique, not_null]
+
+  - name: returns
+    description: Deduplicated returns.
+    columns:
+      - name: return_id
+        data_tests: [unique, not_null]
+
+unit_tests:
+  - name: unit_test_customers_scd2_out_of_order
+    description: A file with an older version arriving later must not become current.
+    model: customers_scd2
+    given:
+      - input: source('bronze', 'CUSTOMERS_RAW')
+        rows:
+          - {customer_id: C1, email: a@x.pl, country: PL, updated_at: "2026-11-20 10:00:00", _ingested_at: "2026-11-20 10:05:00"}
+          - {customer_id: C1, email: b@x.pl, country: PL, updated_at: "2026-11-20 09:00:00", _ingested_at: "2026-11-20 10:10:00"}
+    expect:
+      rows:
+        - {customer_id: C1, email: b@x.pl, valid_from: "2026-11-20 09:00:00", valid_to: "2026-11-20 10:00:00", is_current: false}
+        - {customer_id: C1, email: a@x.pl, valid_from: "2026-11-20 10:00:00", valid_to: null, is_current: true}

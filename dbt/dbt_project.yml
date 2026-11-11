@@ -1,0 +1,22 @@
+name: lakehouse
+version: "1.0.0"
+profile: lakehouse
+config-version: 2
+
+flags:
+  enable_iceberg_materializations: true
+
+vars:
+  hash_salt: "tbd-2026"
+
+models:
+  lakehouse:
+    +materialized: table
+    +table_format: iceberg
+    +external_volume: EV_LAKEHOUSE
+    silver:
+      +schema: SILVER
+      +post-hook: ["{{ apply_pii_tags() }}"]
+    gold:
+      +schema: GOLD
+      +post-hook: ["{{ apply_pii_tags() }}"]

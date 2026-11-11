@@ -1,0 +1,47 @@
+version: 2
+
+models:
+  - name: customer_ltv
+    description: Lifetime value per (pseudonymised) customer. No PII - readable from DuckDB.
+    columns:
+      - name: customer_key
+        data_tests: [unique, not_null]
+  - name: daily_sales_by_category
+    description: Revenue and units per day and product category (non-cancelled orders).
+  - name: return_rates
+    description: Returned vs delivered units per product category.
+
+unit_tests:
+  - name: unit_test_customer_ltv_hashes_id
+    model: customer_ltv
+    given:
+      - input: source('bronze', 'ORDERS_EVENTS')
+        rows:
+          - {event_id: e1, event_type: placed, event_ts: "2026-11-20 09:00:00", order_id: O1, customer_id: C1, total_amount: 10.00, shipping_country: PL}
+          - {event_id: e2, event_type: delivered, event_ts: "2026-11-20 12:00:00", order_id: O1, customer_id: C1, total_amount: 10.00, shipping_country: PL}
+          - {event_id: e3, event_type: placed, event_ts: "2026-11-20 09:30:00", order_id: O2, customer_id: C1, total_amount: 99.00, shipping_country: PL}
+          - {event_id: e4, event_type: cancelled, event_ts: "2026-11-20 09:40:00", order_id: O2, customer_id: C1, total_amount: 99.00, shipping_country: PL}
+    expect:
+      rows:
+        - {customer_key: "9dfe5e8c43f76a69205e2aa5cd3246d5b432cc30526df3d4a6bd1210e8289dfa", country: PL, order_count: 1, ltv: 10.00}
+
+  - name: unit_test_return_rates
+    model: return_rates
+    given:
+      - input: source('bronze', 'ORDERS_EVENTS')
+        rows:
+          - {event_id: e1, event_type: placed, event_ts: "2026-11-20 09:00:00", order_id: O1, items_json: '[{"product_id": "P1", "qty": 10, "unit_price": 1.0}]'}
+          - {event_id: e2, event_type: delivered, event_ts: "2026-11-20 12:00:00", order_id: O1, items_json: '[{"product_id": "P1", "qty": 10, "unit_price": 1.0}]'}
+      - input: ref('returns')
+        format: sql
+        rows: |
+          select 'r1' as return_id, 'O1' as order_id, 'P1' as product_id, 1 as qty, 'damaged' as reason, '2026-11-21'::timestamp_ntz as returned_at
+          union all
+          select 'r2', 'O1', 'P1', 1, 'damaged', '2026-11-21'::timestamp_ntz
+      - input: ref('products')
+        format: sql
+        rows: |
+          select 'P1' as product_id, 'Book' as name, 'books' as category, 1.0::number(10,2) as unit_price, '2026-11-01'::timestamp_ntz as updated_at
+    expect:
+      rows:
+        - {category: books, delivered_units: 10, returned_units: 2, return_rate: 0.2}

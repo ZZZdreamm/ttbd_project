@@ -1,0 +1,11 @@
+services:
+  lab:
+    build: .
+    image: tbd-lakehouse-lab
+    env_file: ../.env
+    volumes:
+      - ..:/workspace          # repo incl. .secrets (PATs written by Terraform)
+    environment:
+      LAB_TOKEN: ${LAB_TOKEN:?run via mise run lab}
+    ports:
+      - "127.0.0.1:${LAB_PORT:-2718}:2718"

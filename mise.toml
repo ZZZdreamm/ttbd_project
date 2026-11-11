@@ -1,0 +1,221 @@
+# Single source of every command in this exercise: `mise tasks ls` lists them.
+[tools]
+terraform = "1.14"
+python = "3.12"
+uv = "latest"
+gcloud = "latest"
+"github:duckdb/duckdb" = "2.0"
+"pipx:snowflake-cli" = "3.31"
+# Only for running dbt unit tests locally; scheduled runs execute inside Snowflake.
+"pipx:dbt-core" = { version = "1.9", uvx_args = "--with dbt-snowflake~=1.9.0" }
+
+[env]
+_.file = ".env"
+# Snowflake CLI config (connection "tbd") lives in gitignored .secrets/
+SNOWFLAKE_HOME = "{{config_root}}/.secrets"
+# Ignore any quota project from the student's global gcloud config
+# (otherwise every call fails with USER_PROJECT_DENIED).
+CLOUDSDK_BILLING_QUOTA_PROJECT = "LEGACY"
+# Silence google-auth's "end user credentials without a quota project" warning.
+PYTHONWARNINGS = "ignore::UserWarning:google.auth._default"
+
+[tasks."sf:keygen"]
+description = "Generate the Snowflake key pair and print the one-time bootstrap SQL"
+run = "uv run -q python -m tbd_lakehouse.ops.keygen"
+
+[tasks.config]
+description = "Validate .env and print the derived project/bucket names"
+run = "uv run -q python -m tbd_lakehouse.config"
+
+[tasks.bootstrap]
+description = "Terraform: management project, state bucket, GCP budget (set TBD_AUTO_APPROVE=1 to skip the prompt)"
+depends = ["config"]
+dir = "{{config_root}}/bootstrap"
+run = """
+set -euo pipefail
+terraform init -input=false
+terraform apply -input=false ${TBD_AUTO_APPROVE:+-auto-approve}
+mkdir -p ../.state
+printf 'bucket = "%s"\n' "$(terraform output -raw state_bucket)" > ../.state/backend.hcl
+echo "Remote state for the other roots: $(cat ../.state/backend.hcl)"
+"""
+
+[tasks.gcp]
+description = "Terraform: data project, buckets, Pub/Sub, notifications (TBD_AUTO_APPROVE=1 skips the prompt)"
+depends = ["config"]
+dir = "{{config_root}}/gcp"
+run = """
+set -euo pipefail
+test -f ../.state/backend.hcl || { echo "Run 'mise run bootstrap' first (no .state/backend.hcl)." >&2; exit 1; }
+terraform init -input=false -reconfigure -backend-config=../.state/backend.hcl -backend-config=prefix=gcp
+terraform apply -input=false ${TBD_AUTO_APPROVE:+-auto-approve}
+"""
+
+[tasks.snowflake]
+description = "Terraform: Snowflake account config, bronze tables, governance (TBD_AUTO_APPROVE=1 skips the prompt)"
+depends = ["config"]
+dir = "{{config_root}}/snowflake"
+run = """
+set -euo pipefail
+test -f ../.state/backend.hcl || { echo "Run 'mise run bootstrap' first (no .state/backend.hcl)." >&2; exit 1; }
+test -f ../.secrets/terraform_svc.p8 || { echo "Run 'mise run sf:keygen' first (no .secrets/terraform_svc.p8)." >&2; exit 1; }
+export TF_VAR_snowflake_account="$SNOWFLAKE_ACCOUNT"
+terraform init -input=false -reconfigure -backend-config=../.state/backend.hcl -backend-config=prefix=snowflake
+# The second provider (dynamic tables) logs in as PIPELINE_ADMIN on WH_TRANSFORM, so on the
+# first run create just those (and their grants) before Terraform plans everything else.
+PIPELINE_LOGIN='snowflake_grant_account_role.to_terraform_svc["PIPELINE_ADMIN"]'
+if ! terraform state list "$PIPELINE_LOGIN" 2>/dev/null | grep -q .; then
+  echo "First run: creating PIPELINE_ADMIN and WH_TRANSFORM first (the dynamic-table provider logs in with them)."
+  terraform apply -input=false ${TBD_AUTO_APPROVE:+-auto-approve} -target="$PIPELINE_LOGIN" \
+    -target='snowflake_grant_privileges_to_account_role.pipeline_warehouses["transform"]'
+fi
+terraform apply -input=false ${TBD_AUTO_APPROVE:+-auto-approve}
+"""
+
+[tasks."dbt:deploy"]
+description = "Deploy the dbt project to Snowflake (LAKEHOUSE.OPS.LAKEHOUSE_DBT) as PIPELINE_ADMIN"
+depends = ["config"]
+dir = "{{config_root}}"
+run = """
+set -euo pipefail
+# Upload a clean copy: local dbt output (target/, logs/) breaks the stage upload.
+SRC=$(mktemp -d)
+trap 'rm -rf "$SRC"' EXIT
+rsync -a --exclude target --exclude logs --exclude .user.yml --exclude dbt_packages dbt/ "$SRC/"
+snow dbt deploy LAKEHOUSE_DBT --source "$SRC" --role PIPELINE_ADMIN --database LAKEHOUSE --schema OPS
+"""
+
+[tasks."dbt:unit"]
+description = "Run the dbt unit tests from your laptop (no data needed)"
+depends = ["config"]
+dir = "{{config_root}}/dbt"
+run = "dbt test --select test_type:unit --target local --profiles-dir ."
+
+[tasks."dbt:run"]
+description = "Run the dbt task now instead of waiting for its 15-minute schedule"
+run = "snow sql --role PIPELINE_ADMIN -q 'EXECUTE TASK LAKEHOUSE.OPS.RUN_DBT'"
+
+[tasks.dcm]
+description = "Deploy the DCM project (pipes, dbt task, stages) as PIPELINE_ADMIN"
+depends = ["config"]
+dir = "{{config_root}}/dcm"
+run = """
+set -euo pipefail
+LANDING="tbd-${TF_VAR_semester}-stud${TF_VAR_team_id}-data-landing"
+LANDING=$(echo "$LANDING" | tr '[:upper:]' '[:lower:]')
+# After `mise run stop` (INGEST_SVC disabled) a redeploy must not restart anything.
+STOPPED=$(snow sql --format JSON -q "SHOW USERS LIKE 'INGEST_SVC'" 2>/dev/null | grep -c '"disabled": "true"' || true)
+snow dcm create --if-not-exists --role PIPELINE_ADMIN
+snow dcm deploy --role PIPELINE_ADMIN -D "landing_bucket='$LANDING'"
+# Pick up files that landed before the pipes existed (the first file is otherwise missed).
+for p in PIPE_CUSTOMERS PIPE_PRODUCTS PIPE_RETURNS; do
+  snow sql --role PIPELINE_ADMIN -q "ALTER PIPE LAKEHOUSE.BRONZE.$p REFRESH" >/dev/null 2>&1 || echo "($p not refreshed: paused)"
+done
+if [ "$STOPPED" != "0" ]; then
+  snow sql -q "CALL LAKEHOUSE.OPS.STOP_ALL()" >/dev/null
+  echo "Environment was stopped before the deploy: kept it stopped (mise run start to resume)."
+fi
+echo "DCM deployed."
+"""
+
+[tasks.up]
+description = "Everything, in order: bootstrap, gcp, snowflake, dbt:deploy, dcm"
+depends = ["bootstrap"]
+run = [
+  { task = "gcp" },
+  { task = "snowflake" },
+  { task = "dbt:deploy" },
+  { task = "dcm" },
+]
+
+[tasks."gen:stream"]
+description = "Publish order and clickstream events to Pub/Sub"
+run = "uv run -q python -m tbd_lakehouse.generators.stream"
+
+[tasks."gen:batch"]
+description = "Drop customer/product/return files into the landing bucket"
+run = "uv run -q python -m tbd_lakehouse.generators.batch"
+
+[tasks.bridge]
+description = "Pub/Sub -> Snowpipe Streaming bridge (runs until Ctrl-C)"
+depends = ["config"]
+run = "uv run -q python -m tbd_lakehouse.bridge.main"
+
+[tasks.lab]
+description = "Start Spark + DuckDB marimo lab (docker compose)"
+dir = "{{config_root}}/lab"
+run = """
+set -euo pipefail
+TOKEN_FILE=../.secrets/lab_token
+[ -s "$TOKEN_FILE" ] || (umask 077; openssl rand -hex 16 > "$TOKEN_FILE")
+export LAB_TOKEN=$(cat "$TOKEN_FILE")
+docker compose up -d --build
+echo "marimo lab: http://localhost:${LAB_PORT:-2718}/?access_token=${LAB_TOKEN}  (notebooks: 01_parity, 02_masking)"
+"""
+
+[tasks."lab:down"]
+description = "Stop the lab containers"
+dir = "{{config_root}}/lab"
+run = "LAB_TOKEN=unused docker compose down"
+
+[tasks.start]
+description = "Resume pipes, tasks and dynamic tables"
+run = "uv run -q python -m tbd_lakehouse.ops.session start"
+
+[tasks.stop]
+description = "Suspend everything that can spend credits (run at the end of every session)"
+run = "uv run -q python -m tbd_lakehouse.ops.session stop"
+
+[tasks.cost]
+description = "Show Snowflake credits used vs the 12-credit cap"
+run = "uv run -q python -m tbd_lakehouse.ops.cost"
+
+[tasks.test]
+description = "Run the exercise checks and print a pass/fail table (needs `mise run lab` for checks 4-6)"
+depends = ["config"]
+dir = "{{config_root}}"
+run = """
+set -uo pipefail
+mkdir -p .state && rm -f .state/test-results-*.json
+export TF_VAR_snowflake_account="$SNOWFLAKE_ACCOUNT"
+echo "== host checks (Terraform, GCP, Snowflake, pipelines) =="
+uv run -q pytest tests/live --ignore=tests/live/test_engines.py -q -W ignore -p no:cacheprovider --results-file=.state/test-results-host.json || true
+export LAB_TOKEN=$(cat .secrets/lab_token 2>/dev/null || echo unused)
+if [ -n "$(docker compose -f lab/docker-compose.yml ps -q lab 2>/dev/null)" ]; then
+  echo "== lab checks (Spark + DuckDB via Horizon) =="
+  docker compose -f lab/docker-compose.yml exec -T lab pytest tests/live/test_engines.py -q -p no:cacheprovider --results-file=.state/test-results-lab.json || true
+else
+  echo '{"4 Parity": [["failed", "lab not running: run mise run lab first"]], "5 Masking": [["failed", "lab not running: run mise run lab first"]], "6 Tag propagation": [["failed", "lab not running: run mise run lab first"]]}' > .state/test-results-lab.json
+fi
+uv run -q python -m tests.live.report .state/test-results-host.json .state/test-results-lab.json
+"""
+
+[tasks.destroy]
+description = "Tear EVERYTHING down: Snowflake objects, data project, management project (TBD_AUTO_APPROVE=1 skips the prompt)"
+depends = ["config"]
+dir = "{{config_root}}"
+run = """
+set -uo pipefail
+if [ -z "${TBD_AUTO_APPROVE:-}" ]; then
+  read -r -p "This deletes your GCP projects and all Snowflake objects. Type 'destroy' to continue: " ok
+  [ "$ok" = "destroy" ] || { echo "aborted"; exit 1; }
+fi
+export TF_VAR_snowflake_account="$SNOWFLAKE_ACCOUNT"
+(cd lab && LAB_TOKEN=unused docker compose down) || true
+uv run -q python -m tbd_lakehouse.ops.session stop || true
+(cd dcm && snow dcm purge --force --role PIPELINE_ADMIN && snow dcm drop --role PIPELINE_ADMIN) || true
+snow sql --role PIPELINE_ADMIN -q "DROP DBT PROJECT IF EXISTS LAKEHOUSE.OPS.LAKEHOUSE_DBT" || true
+set -e
+# dbt-built tables aren't in Terraform but keep the row access policy in use.
+uv run -q python -m tbd_lakehouse.ops.teardown
+(cd snowflake && terraform destroy -input=false -auto-approve)
+# WH_QUERY (from the bootstrap SQL) is how Terraform logs in: drop it only now.
+snow sql -q "DROP WAREHOUSE IF EXISTS WH_QUERY"
+(cd gcp && terraform destroy -input=false -auto-approve)
+(cd bootstrap && terraform destroy -input=false -auto-approve)
+echo "Destroyed. Now run: mise run verify-destroyed"
+"""
+
+[tasks.verify-destroyed]
+description = "Confirm nothing is left running or billing"
+run = "uv run -q python -m tbd_lakehouse.ops.verify_destroyed"

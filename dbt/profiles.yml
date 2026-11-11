@@ -1,0 +1,25 @@
+# Target "snowflake" is used inside Snowflake (EXECUTE DBT PROJECT): auth comes from the task's session.
+# Target "local" is only for running unit tests from a laptop (`mise run dbt:unit`).
+lakehouse:
+  target: snowflake
+  outputs:
+    snowflake:
+      type: snowflake
+      account: lab
+      user: lab
+      role: PIPELINE_ADMIN
+      database: LAKEHOUSE
+      schema: OPS
+      warehouse: WH_TRANSFORM
+      threads: 4
+    local:
+      type: snowflake
+      account: "{{ env_var('SNOWFLAKE_ACCOUNT', 'unset') }}"
+      user: TERRAFORM_SVC
+      authenticator: snowflake_jwt
+      private_key_path: "{{ env_var('DBT_PRIVATE_KEY_PATH', '../.secrets/terraform_svc.p8') }}"
+      role: PIPELINE_ADMIN
+      database: LAKEHOUSE
+      schema: OPS
+      warehouse: WH_QUERY
+      threads: 4
