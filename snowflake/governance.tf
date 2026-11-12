@@ -3,7 +3,7 @@ locals {
   # Roles that see raw values. PIPELINE_ADMIN must be here: dynamic tables and dbt models are
   # built as their owner role, and would otherwise store already-masked values.
   raw_roles      = ["PII_ADMIN", "PIPELINE_ADMIN"]
-  all_rows_roles = ["PII_ADMIN", "PIPELINE_ADMIN", "ANALYST", "ACCOUNTADMIN"]
+  all_rows_roles = ["PII_ADMIN", "PIPELINE_ADMIN", "ANALYST", "MARKETING", "ACCOUNTADMIN"]
   sql_list       = { for k, v in { raw = local.raw_roles, all_rows = local.all_rows_roles } : k => join(", ", [for r in v : "'${r}'"]) }
 
   support_countries = { SUPPORT_USER = ["PL", "NL"] }

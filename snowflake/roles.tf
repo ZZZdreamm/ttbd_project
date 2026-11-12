@@ -1,9 +1,10 @@
 locals {
-  roles = ["PIPELINE_ADMIN", "INGEST", "ANALYST", "SUPPORT", "PII_ADMIN"]
+  roles = ["PIPELINE_ADMIN", "INGEST", "ANALYST", "SUPPORT", "PII_ADMIN", "MARKETING"]
   demo_users = {
     ANALYST_USER   = "ANALYST"
     SUPPORT_USER   = "SUPPORT"
     PII_ADMIN_USER = "PII_ADMIN"
+    MARKETING_USER = "MARKETING"
   }
   demo_roles   = toset(values(local.demo_users))
   data_schemas = toset(["BRONZE", "SILVER", "GOLD"])
@@ -78,7 +79,7 @@ resource "snowflake_grant_privileges_to_account_role" "pipeline_integrations" {
 # Every role that owns or reads Iceberg tables needs USAGE on the external volume
 # (Horizon vended credentials fail otherwise).
 resource "snowflake_grant_privileges_to_account_role" "external_volume" {
-  for_each          = toset(["PIPELINE_ADMIN", "INGEST", "ANALYST", "SUPPORT", "PII_ADMIN"])
+  for_each          = toset(["PIPELINE_ADMIN", "INGEST", "ANALYST", "SUPPORT", "PII_ADMIN", "MARKETING"])
   account_role_name = snowflake_account_role.roles[each.value].name
   privileges        = ["USAGE"]
   on_account_object {
@@ -136,6 +137,22 @@ resource "snowflake_grant_privileges_to_account_role" "demo_future_select" {
       in_schema          = snowflake_schema.schemas[each.value[1]].fully_qualified_name
     }
   }
+}
+
+# Future grants only cover objects created from now on. The silver/gold tables (dbt, dynamic tables)
+# already exist when a role is added, so grant SELECT on the existing ones too.
+resource "snowflake_grant_privileges_to_account_role" "demo_existing_select" {
+  for_each = { for p in setproduct(local.demo_roles, local.data_schemas, ["ICEBERG TABLES", "DYNAMIC TABLES", "TABLES", "VIEWS"]) :
+  "${p[0]}.${p[1]}.${p[2]}" => p }
+  account_role_name = snowflake_account_role.roles[each.value[0]].name
+  privileges        = ["SELECT"]
+  on_schema_object {
+    all {
+      object_type_plural = each.value[2]
+      in_schema          = snowflake_schema.schemas[each.value[1]].fully_qualified_name
+    }
+  }
+  depends_on = [snowflake_execute.dynamic_table, snowflake_execute.dynamic_table_gold]
 }
 
 resource "snowflake_grant_privileges_to_account_role" "demo_warehouse" {
